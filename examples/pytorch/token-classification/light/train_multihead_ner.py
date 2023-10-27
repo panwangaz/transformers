@@ -6,12 +6,12 @@ import os.path as osp
 import numpy as np
 from mmengine import Config
 from transformers import (
-    AutoModelForTokenClassification, 
     TrainingArguments, 
     Trainer, 
 )
 from transformers.trainer_utils import get_last_checkpoint
-from dataset import DATASETS
+from dataset import DATASETS, NAMEDataset, DATEDataset, DateNameDataset
+from model.modeling_multihead_tokencls import MultiheadBertForTokenClassification
 
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,9 @@ def parse_args():
     parser.add_argument('--eval', action='store_true', help='whether to eval')
     parser.add_argument('--test', action='store_true', help='whether to predict and save the results')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
-    parser.add_argument('--prefix-token', help='the prefix special token for ner task')
     parser.add_argument('--epoches', type=int, default=10, help='total training epoches')
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
+    parser.add_argument('--prefix-token', help='the prefix special token for ner task')
     parser.add_argument('--lr', type=float, default=5e-5, help="the learning rate")
     parser.add_argument('--bs', type=int, default=16, help="batch size per gpu")
     group_gpus = parser.add_mutually_exclusive_group()
@@ -67,10 +67,10 @@ def main():
     if args.bs is not None:
         cfg.training.per_device_train_batch_size=args.bs
         cfg.training.per_device_eval_batch_size=args.bs
-    if args.prefix_token is not None:
-        cfg.data.with_prefix_token = args.prefix_token
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
+    if args.prefix_token is not None:
+        cfg.data.with_prefix_token = args.prefix_token
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -85,7 +85,7 @@ def main():
     tokenizer, data_collator = all_dataset.tokenizer, all_dataset.data_collator
 
     # define models
-    model = AutoModelForTokenClassification.from_pretrained(model_args.model_name_or_path,
+    model = MultiheadBertForTokenClassification.from_pretrained(model_args.model_name_or_path,
                                                             num_labels=len(data_args.ner_tags),
                                                             from_tf=bool(".ckpt" in model_args.model_name_or_path),
                                                             cache_dir=model_args.cache_dir,

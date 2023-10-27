@@ -11,11 +11,11 @@ from .utils import classfication_metric, DATASETS
 logger = datasets.logging.get_logger(__name__)
 
 @DATASETS.register_module()
-class NERDataset(object):
+class NAMEDataset(object):
     """Light's NER Dataset"""
     def __init__(self, 
                  # define dataset
-                 ner_tags=("O", "NAME"), 
+                 ner_tags=("O", "USER_NAME", "NON_USER_NAME"), 
                  context_window=6, 
                  train_file=None, 
                  validation_file=None, 
@@ -31,6 +31,7 @@ class NERDataset(object):
                  label_column_name="ner_tags",
                  use_padding_for_context = False,
                  max_seq_length = 150,
+                 with_prefix_token=None,
                  *args, 
                  **kwargs):
         assert len(ner_tags) > 0, "you must define net tags"
@@ -40,8 +41,8 @@ class NERDataset(object):
         self._train_file, self._val_file, self._test_file = train_file, validation_file, test_file
         self.text_column_name, self.label_column_name = text_column_name, label_column_name
         self.use_padding_for_context, self.max_seq_length = use_padding_for_context, max_seq_length
-        self._dataset = {}
-
+        self._dataset, self.with_prefix_token = {}, with_prefix_token
+        
         # prepare tokenizer
         if tokenizer_name_or_path is not None:
             self._tokenizer = AutoTokenizer.from_pretrained(
@@ -97,22 +98,26 @@ class NERDataset(object):
     
     def _get_labels(self, data):
         for item in data:
-            order, label_list = item["order"], item["label"]
+            order = item["order"]
+            name_label_list, name_index = item["label"], item["user_index"]
             item["flat_order"], item["flat_label"] = [], []
-
-            for sentence, labels in zip(order, label_list):
-                if sentence[0]:
-                    text = "[USER] "
+            for sentence, name_labels in zip(order, name_label_list):
+                if self.with_prefix_token is not None:
+                    text = f"{self.with_prefix_token} [USER] " if sentence[0] else f"{self.with_prefix_token} [ADVISOR] "
                 else:
-                    text = "[ADVISOR] "
+                    text = "[USER] " if sentence[0] else "[ADVISOR] "
                 text += sentence[1].strip()
                 text = text.split()
                 item["flat_order"].append(text)
                 label_flattened = [ "O" for _ in range(len(text))]
-                for label in labels:
+                name_count = 0
+                # process name labels
+                for label in name_labels:
+                    name_value = "USER_NAME" if isinstance(name_index, (list, tuple, )) and name_count in name_index else "NON_USER_NAME"
+                    name_count += 1
                     for label_index in range(len(label)):
-                        tag_index = label[label_index] + 1
-                        label_flattened[tag_index] = "NAME"
+                        tag_index = label[label_index] + 1 if self.with_prefix_token is None else label[label_index] + 2
+                        label_flattened[tag_index] = name_value
                 item["flat_label"].append(label_flattened)
         return data
 
@@ -166,13 +171,7 @@ class NERDataset(object):
 
     @staticmethod
     def tokenize_and_align_labels(tokenizer, text_column_name, label_column_name, 
-                                  padding, max_seq_length, label2id, examples):
-        # check for bottom line
-        for i in range(len(examples[text_column_name])):
-            bottom_len = examples["bottom_len"][i]
-            if examples["tokens"][i][-bottom_len] != "[USER]":
-                raise ValueError("wrong dataset")
-            
+                                  padding, max_seq_length, label2id, examples):           
         tokenized_inputs = tokenizer(
             examples[text_column_name],
             padding=padding,
@@ -247,7 +246,7 @@ if __name__ == "__main__":
     val_path = "data/NERDataset/tagged_valid0000_01.json"
     test_path = "data/NERDataset/tagged_valid0000_01.json"
     tokenizer_path = "ckpts/bert-base-ner"
-    all_dataset = NERDataset(train_file=train_path, val_file=val_path, test_file=test_path, tokenizer_name_or_path=tokenizer_path)
+    all_dataset = NAMEDataset(train_file=train_path, val_file=val_path, test_file=test_path, tokenizer_name_or_path=tokenizer_path)
     train_dataset = all_dataset.train()
     val_dataset = all_dataset.val()
     test_dataset = all_dataset.test()

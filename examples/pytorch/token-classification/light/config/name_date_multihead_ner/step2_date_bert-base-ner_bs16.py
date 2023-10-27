@@ -23,20 +23,20 @@ _base_ = [
     "../_base_/training.py",
 ]
 
-tokenizer_name = "ckpts/bert-base-ner"
+tokenizer_name = "ckpts/bert-base-ner-multihead-step2"
 output_dir = "work_dirs/"
 cache_dir = "work_dirs/test-name-date-ner"
 
 data = dict(
-    type="DateNameDataset",
-    train_file="data/NAME_DATE_NER/train.json",
-    validation_file="data/NAME_DATE_NER/val.json",
-    test_file="data/NAME_DATE_NER/val.json",
+    type="DATEDataset",
+    train_file="data/DATE_NER/train.json",
+    validation_file="data/DATE_NER/val.json",
+    test_file="data/DATE_NER/val.json",
     text_column_name="tokens",
     label_column_name="ner_tags",
 
     # ner dataset arguments
-    ner_tags=("O", "USER_NAME", "NON_USER_NAME", "USER_DATE", "NON_USER_DATE"), 
+    ner_tags=("O", "USER_DATE", "NON_USER_DATE"), 
     use_augmented_data=False,
     context_window=6,
     use_padding_for_context=True,

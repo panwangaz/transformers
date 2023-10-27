@@ -58,6 +58,7 @@ else:
         "BertModel",
         "BertPreTrainedModel",
         "load_tf_weights_in_bert",
+        "MultiheadBertForTokenClassification",
     ]
 
 try:
@@ -140,6 +141,7 @@ if TYPE_CHECKING:
             BertModel,
             BertPreTrainedModel,
             load_tf_weights_in_bert,
+            MultiheadBertForTokenClassification,
         )
 
     try:
