@@ -23,13 +23,15 @@ class DATEDataset(NAMEDataset):
                  use_padding_for_context = False,
                  max_seq_length = 150,
                  with_prefix_token=None,
+                 task_id=None,
                  *args, 
                  **kwargs):
         super(DATEDataset, self).__init__(ner_tags=ner_tags, context_window=context_window, train_file=train_file, 
             validation_file=validation_file, test_file=test_file, use_augmented_data=use_augmented_data, 
             tokenizer_name_or_path=tokenizer_name_or_path, cache_dir=cache_dir, use_fast=use_fast, revision=revision, 
             use_auth_token=use_auth_token, text_column_name=text_column_name, label_column_name=label_column_name, 
-            use_padding_for_context = use_padding_for_context, max_seq_length = max_seq_length, *args, **kwargs)
+            use_padding_for_context = use_padding_for_context, max_seq_length = max_seq_length, 
+            with_prefix_token=with_prefix_token, task_id=task_id, *args, **kwargs)
         
     def _get_labels(self, data):
         for item in data:

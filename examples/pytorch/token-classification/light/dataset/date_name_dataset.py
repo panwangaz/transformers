@@ -29,7 +29,8 @@ class DateNameDataset(NAMEDataset):
             validation_file=validation_file, test_file=test_file, use_augmented_data=use_augmented_data, 
             tokenizer_name_or_path=tokenizer_name_or_path, cache_dir=cache_dir, use_fast=use_fast, revision=revision, 
             use_auth_token=use_auth_token, text_column_name=text_column_name, label_column_name=label_column_name, 
-            use_padding_for_context = use_padding_for_context, max_seq_length = max_seq_length, *args, **kwargs)
+            use_padding_for_context = use_padding_for_context, max_seq_length = max_seq_length, 
+            with_prefix_token=with_prefix_token, *args, **kwargs)
         
     def _get_labels(self, data):
         for item in data:

@@ -23,27 +23,48 @@ _base_ = [
     "../_base_/training.py",
 ]
 
-tokenizer_name = "ckpts/bert-base-ner-multihead-step2"
+tokenizer_name = "ckpts/bert-base-ner-multihead-step1"
 output_dir = "work_dirs/"
 cache_dir = "work_dirs/test-name-date-ner"
 
-data = dict(
-    type="DATEDataset",
-    train_file="data/DATE_NER/train.json",
-    validation_file="data/DATE_NER/val.json",
-    test_file="data/DATE_NER/val.json",
-    text_column_name="tokens",
-    label_column_name="ner_tags",
+data = [
+    dict(
+        type="NAMEDataset",
+        train_file="data/NAME_NER/train.json",
+        validation_file="data/NAME_NER/val.json",
+        test_file="data/NAME_NER/val.json",
+        text_column_name="tokens",
+        label_column_name="ner_tags",
 
-    # ner dataset arguments
-    ner_tags=("O", "USER_DATE", "NON_USER_DATE"), 
-    use_augmented_data=False,
-    context_window=6,
-    use_padding_for_context=True,
-    tokenizer_name_or_path=tokenizer_name,
-    cache_dir=cache_dir,
-    with_prefix_token=None,
-)
+        # ner dataset arguments
+        ner_tags=("O", "USER_NAME", "NON_USER_NAME"), 
+        use_augmented_data=False,
+        context_window=6,
+        use_padding_for_context=True,
+        tokenizer_name_or_path=tokenizer_name,
+        cache_dir=cache_dir,
+        with_prefix_token=None,
+        task_id=0,
+    ),
+     dict(
+         type="DATEDataset",
+         train_file="data/DATE_NER/train.json",
+         validation_file="data/DATE_NER/val.json",
+         test_file="data/DATE_NER/val.json",
+         text_column_name="tokens",
+         label_column_name="ner_tags",
+
+         # ner dataset arguments
+         ner_tags=("O", "USER_DATE", "NON_USER_DATE"), 
+         use_augmented_data=False,
+         context_window=6,
+         use_padding_for_context=True,
+         tokenizer_name_or_path=tokenizer_name,
+         cache_dir=cache_dir,
+         with_prefix_token=None,
+         task_id=1,
+    )
+]
 
 model = dict(
     model_name_or_path=tokenizer_name,

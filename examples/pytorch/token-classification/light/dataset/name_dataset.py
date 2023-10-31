@@ -32,6 +32,7 @@ class NAMEDataset(object):
                  use_padding_for_context = False,
                  max_seq_length = 150,
                  with_prefix_token=None,
+                 task_id=None,
                  *args, 
                  **kwargs):
         assert len(ner_tags) > 0, "you must define net tags"
@@ -42,7 +43,7 @@ class NAMEDataset(object):
         self.text_column_name, self.label_column_name = text_column_name, label_column_name
         self.use_padding_for_context, self.max_seq_length = use_padding_for_context, max_seq_length
         self._dataset, self.with_prefix_token = {}, with_prefix_token
-        
+
         # prepare tokenizer
         if tokenizer_name_or_path is not None:
             self._tokenizer = AutoTokenizer.from_pretrained(
@@ -61,7 +62,7 @@ class NAMEDataset(object):
                 logger.info(f"start to process {file} data!")
                 cur_dataset = self.get_dataset(file, context_window, use_augmented_data)
                 self._dataset[name] = cur_dataset.map(lambda x : self.tokenize_and_align_labels(self._tokenizer, \
-                        text_column_name, label_column_name, use_padding_for_context, max_seq_length, self.label2id, x), batched=True)
+                        text_column_name, label_column_name, use_padding_for_context, max_seq_length, self.label2id, task_id, x), batched=True)
 
     @property
     def dataset(self):
@@ -171,7 +172,7 @@ class NAMEDataset(object):
 
     @staticmethod
     def tokenize_and_align_labels(tokenizer, text_column_name, label_column_name, 
-                                  padding, max_seq_length, label2id, examples):           
+                                  padding, max_seq_length, label2id, task_id, examples):           
         tokenized_inputs = tokenizer(
             examples[text_column_name],
             padding=padding,
@@ -213,6 +214,8 @@ class NAMEDataset(object):
                 previous_word_idx = word_idx
             labels.append(label_ids)
         tokenized_inputs["labels"] = labels
+        if task_id is not None:
+            tokenized_inputs["task_ids"] = [task_id] * len(labels)
         return tokenized_inputs
 
     @staticmethod

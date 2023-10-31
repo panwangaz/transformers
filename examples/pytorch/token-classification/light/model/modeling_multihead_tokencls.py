@@ -23,6 +23,47 @@ _TOKEN_CLASS_EXPECTED_OUTPUT = (
 _TOKEN_CLASS_EXPECTED_LOSS = 0.01
 
 
+class TokenClassificationHead(nn.Module):
+    def __init__(self, hidden_size, num_labels, dropout_p=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout_p)
+        self.classifier = nn.Linear(hidden_size, num_labels)
+        self.num_labels = num_labels
+
+        self._init_weights()
+
+    def _init_weights(self):
+        self.classifier.weight.data.normal_(mean=0.0, std=0.02)
+        if self.classifier.bias is not None:
+            self.classifier.bias.data.zero_()
+
+    def forward(
+        self, sequence_output, labels=None, attention_mask=None, **kwargs
+    ):
+        sequence_output_dropout = self.dropout(sequence_output)
+        logits = self.classifier(sequence_output_dropout)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            labels = labels.long()
+
+            # Only keep active parts of the loss
+            if attention_mask is not None:
+                active_loss = attention_mask.view(-1) == 1
+                active_logits = logits.view(-1, self.num_labels)
+                active_labels = torch.where(
+                    active_loss,
+                    labels.view(-1),
+                    torch.tensor(loss_fct.ignore_index).type_as(labels),
+                )
+                loss = loss_fct(active_logits, active_labels)
+            else:
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        return logits, loss
+    
+
 @add_start_docstrings(
     """
     Bert Model with a token classification head on top (a linear layer on top of the hidden-states output) e.g. for
@@ -34,32 +75,27 @@ class MultiheadBertForTokenClassification(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
-
         self.bert = BertModel(config, add_pooling_layer=False)
-        classifier_dropout = (
-            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
-        )
-        self.dropout = nn.Dropout(classifier_dropout)
-        if hasattr(config, "name_num_labels"):
-            self.name_num_labels = config.name_num_labels
-            self.name_head = nn.Linear(config.hidden_size, config.name_num_labels)
-        if hasattr(config, "date_num_labels"):
-            self.date_num_labels = config.date_num_labels
-            self.date_head = nn.Linear(config.hidden_size, config.date_num_labels)
 
-        self.training_part = config.training_part if hasattr(config, "training_part") else None
+        self.output_heads = nn.ModuleDict()
+        self.id2head = dict()
+        for task in config.tasks:
+            decoder = self._create_output_head(self.bert.config.hidden_size, task)
+            # ModuleDict requires keys to be strings
+            cur_head = f"{task['name']}_head"
+            self.output_heads[cur_head] = decoder
+            self.id2head[task["id"]] = cur_head
 
         # Initialize weights and apply final processing
         self.post_init()
 
-    @property
-    def with_name_head(self):
-        return self.training_part == "name"
-    
-    @property
-    def with_date_head(self):
-        return self.training_part == "date"
-    
+    @staticmethod
+    def _create_output_head(encoder_hidden_size: int, task):
+        if task["type"] == "token_classification":
+            return TokenClassificationHead(encoder_hidden_size, task["num_labels"])
+        else:
+            raise NotImplementedError()
+            
     @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_TOKEN_CLASSIFICATION,
@@ -80,6 +116,7 @@ class MultiheadBertForTokenClassification(BertPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        task_ids=None,
     ) -> Union[Tuple[torch.Tensor], TokenClassifierMultiheadOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -100,19 +137,20 @@ class MultiheadBertForTokenClassification(BertPreTrainedModel):
         )
 
         sequence_output = outputs[0]
+        unique_task_ids_list = torch.unique(task_ids).tolist()
+        loss_list, logits = [], None
+        for unique_task_id in unique_task_ids_list:
+            task_id_filter = task_ids == unique_task_id
+            logits, task_loss = self.output_heads[self.id2head[unique_task_id]].forward(
+                sequence_output[task_id_filter],
+                labels=None if labels is None else labels[task_id_filter],
+                attention_mask=attention_mask[task_id_filter],
+            )
 
-        sequence_output = self.dropout(sequence_output)
-        # choice name or date head
-        if self.with_name_head:
-            name_logits = self.name_head(sequence_output)
-        if self.with_date_head:
-            date_logits = self.date_head(sequence_output)
-        logits = name_logits if self.with_name_head else date_logits
+            if labels is not None:
+                loss_list.append(task_loss)
 
-        loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+        loss = None if not loss_list else torch.stack(loss_list).mean()
 
         if not return_dict:
             output = (logits,) + outputs[2:]
@@ -124,4 +162,3 @@ class MultiheadBertForTokenClassification(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-    

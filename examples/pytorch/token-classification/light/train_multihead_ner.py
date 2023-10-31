@@ -1,22 +1,269 @@
 import os
 import time
+import torch
 import logging
 import argparse
+import datasets
 import os.path as osp
 import numpy as np
+from typing import List, Optional
+from packaging import version
+from torch.utils.data import DataLoader
 from mmengine import Config
 from transformers import (
     TrainingArguments, 
     Trainer, 
+    AutoTokenizer,
+    DataCollatorForTokenClassification,
 )
-from transformers.trainer_utils import get_last_checkpoint
+from transformers.integrations.deepspeed import deepspeed_init
+from transformers.utils import is_accelerate_available
+from transformers.trainer_utils import (
+    EvalLoopOutput,
+    EvalPrediction,
+    denumpify_detensorize,
+    get_last_checkpoint,
+    has_length,
+)
+from transformers.trainer_pt_utils import (
+    IterableDatasetShard,
+    find_batch_size,
+    nested_concat,
+    nested_numpify,
+)
+from transformers.integrations.deepspeed import deepspeed_init
+from transformers.training_args import TrainingArguments
 from dataset import DATASETS, NAMEDataset, DATEDataset, DateNameDataset
 from model.modeling_multihead_tokencls import MultiheadBertForTokenClassification
+from model.configuration_multihead_tokencls import MultiHeadClsConfig
 
+if is_accelerate_available():
+    from accelerate import __version__ as accelerate_version
 
 logger = logging.getLogger(__name__)
 
+ALL_DATASET_LABELS = {
+    "eval_NAMEDataset": ["O", "USER_NAME", "NON_USER_NAME"],
+    "eval_DATEDataset": ["O", "USER_DATE", "NON_USER_DATE"],
+}
 
+class MultiheadTrainer(Trainer):
+
+    def evaluation_loop(
+    self,
+    dataloader: DataLoader,
+    description: str,
+    prediction_loss_only: Optional[bool] = None,
+    ignore_keys: Optional[List[str]] = None,
+    metric_key_prefix: str = "eval",
+    ) -> EvalLoopOutput:
+        """
+        Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
+
+        Works both with or without labels.
+        """
+        args = self.args
+        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
+
+        # if eval is called w/o train, handle model prep here
+        if self.is_deepspeed_enabled and self.deepspeed is None:
+            _, _ = deepspeed_init(self, num_training_steps=0, inference=True)
+        model = self._wrap_model(self.model, training=False, dataloader=dataloader)
+
+        if len(self.accelerator._models) == 0 and model is self.model:
+            model = (
+                self.accelerator.prepare(model)
+                if self.is_deepspeed_enabled
+                else self.accelerator.prepare_model(model, evaluation_mode=True)
+            )
+            if self.is_fsdp_enabled:
+                self.model = model
+            # for the rest of this function `model` is the outside model, whether it was wrapped or not
+            if model is not self.model:
+                self.model_wrapped = model
+            # backward compatibility
+            if self.is_deepspeed_enabled:
+                self.deepspeed = self.model_wrapped
+
+        # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
+        # while ``train`` is running, cast it to the right dtype first and then put on device
+        if not self.is_in_train:
+            if args.fp16_full_eval:
+                model = model.to(dtype=torch.float16, device=args.device)
+            elif args.bf16_full_eval:
+                model = model.to(dtype=torch.bfloat16, device=args.device)
+        batch_size = self.args.eval_batch_size
+
+        logger.info(f"***** Running {description} *****")
+        if has_length(dataloader):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+        logger.info(f"  Batch size = {batch_size}")
+        model.eval()
+        self.callback_handler.eval_dataloader = dataloader
+        # Do this before wrapping.
+        eval_dataset = getattr(dataloader, "dataset", None)
+
+        if args.past_index >= 0:
+            self._past = None
+
+        # Initialize containers
+        # losses/preds/labels on GPU/TPU (accumulated for eval_accumulation_steps)
+        losses_host = None
+        preds_host = None
+        labels_host = None
+        inputs_host = None
+        # losses/preds/labels on CPU (final containers)
+        all_losses = None
+        all_preds = None
+        all_labels = None
+        all_inputs = None
+        # Will be useful when we have an iterable dataset so don't know its length.
+
+        observed_num_examples = 0
+        # Main evaluation loop
+        for step, inputs in enumerate(dataloader):
+            # Update the observed num examples
+            observed_batch_size = find_batch_size(inputs)
+            if observed_batch_size is not None:
+                observed_num_examples += observed_batch_size
+                # For batch samplers, batch_size is not known by the dataloader in advance.
+                if batch_size is None:
+                    batch_size = observed_batch_size
+
+            # Prediction step
+            loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+            main_input_name = getattr(self.model, "main_input_name", "input_ids")
+            inputs_decode = self._prepare_input(inputs[main_input_name]) if args.include_inputs_for_metrics else None
+
+            # Update containers on host
+            if loss is not None:
+                losses = self.accelerator.gather_for_metrics((loss.repeat(batch_size)))
+                losses_host = losses if losses_host is None else nested_concat(losses_host, losses, padding_index=-100)
+            if labels is not None:
+                labels = self.accelerator.pad_across_processes(labels, dim=1, pad_index=-100)
+            if inputs_decode is not None:
+                inputs_decode = self.accelerator.pad_across_processes(inputs_decode, dim=1, pad_index=-100)
+                inputs_decode = self.accelerator.gather_for_metrics((inputs_decode))
+                inputs_host = (
+                    inputs_decode
+                    if inputs_host is None
+                    else nested_concat(inputs_host, inputs_decode, padding_index=-100)
+                )
+            if logits is not None:
+                logits = self.accelerator.pad_across_processes(logits, dim=1, pad_index=-100)
+                if self.preprocess_logits_for_metrics is not None:
+                    logits = self.preprocess_logits_for_metrics(logits, labels)
+                logits = self.accelerator.gather_for_metrics((logits))
+                preds_host = logits if preds_host is None else nested_concat(preds_host, logits, padding_index=-100)
+
+            if labels is not None:
+                labels = self.accelerator.gather_for_metrics((labels))
+                labels_host = labels if labels_host is None else nested_concat(labels_host, labels, padding_index=-100)
+
+            self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
+            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
+            if (
+                args.eval_accumulation_steps is not None
+                and (step + 1) % args.eval_accumulation_steps == 0
+                and (self.accelerator.sync_gradients or version.parse(accelerate_version) > version.parse("0.20.3"))
+            ):
+                if losses_host is not None:
+                    losses = nested_numpify(losses_host)
+                    all_losses = losses if all_losses is None else np.concatenate((all_losses, losses), axis=0)
+                if preds_host is not None:
+                    logits = nested_numpify(preds_host)
+                    all_preds = logits if all_preds is None else nested_concat(all_preds, logits, padding_index=-100)
+                if inputs_host is not None:
+                    inputs_decode = nested_numpify(inputs_host)
+                    all_inputs = (
+                        inputs_decode
+                        if all_inputs is None
+                        else nested_concat(all_inputs, inputs_decode, padding_index=-100)
+                    )
+                if labels_host is not None:
+                    labels = nested_numpify(labels_host)
+                    all_labels = (
+                        labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
+                    )
+                # Set back to None to begin a new accumulation
+                losses_host, preds_host, inputs_host, labels_host = None, None, None, None
+
+        if args.past_index and hasattr(self, "_past"):
+            # Clean the state at the end of the evaluation loop
+            delattr(self, "_past")
+
+        # Gather all remaining tensors and put them back on the CPU
+        if losses_host is not None:
+            losses = nested_numpify(losses_host)
+            all_losses = losses if all_losses is None else np.concatenate((all_losses, losses), axis=0)
+        if preds_host is not None:
+            logits = nested_numpify(preds_host)
+            all_preds = logits if all_preds is None else nested_concat(all_preds, logits, padding_index=-100)
+        if inputs_host is not None:
+            inputs_decode = nested_numpify(inputs_host)
+            all_inputs = (
+                inputs_decode if all_inputs is None else nested_concat(all_inputs, inputs_decode, padding_index=-100)
+            )
+        if labels_host is not None:
+            labels = nested_numpify(labels_host)
+            all_labels = labels if all_labels is None else nested_concat(all_labels, labels, padding_index=-100)
+
+        # Number of samples
+        if has_length(eval_dataset):
+            num_samples = len(eval_dataset)
+        # The instance check is weird and does not actually check for the type, but whether the dataset has the right
+        # methods. Therefore we need to make sure it also has the attribute.
+        elif isinstance(eval_dataset, IterableDatasetShard) and getattr(eval_dataset, "num_examples", 0) > 0:
+            num_samples = eval_dataset.num_examples
+        else:
+            if has_length(dataloader):
+                num_samples = self.num_examples(dataloader)
+            else:  # both len(dataloader.dataset) and len(dataloader) fail
+                num_samples = observed_num_examples
+        if num_samples == 0 and observed_num_examples > 0:
+            num_samples = observed_num_examples
+
+        # Metrics!
+        if self.compute_metrics is not None and all_preds is not None and all_labels is not None:
+            if args.include_inputs_for_metrics:
+                metrics = self.compute_metrics(
+                    EvalPrediction(predictions=all_preds, label_ids=all_labels, inputs=all_inputs), ALL_DATASET_LABELS[metric_key_prefix]
+                )
+            else:
+                metrics = self.compute_metrics(EvalPrediction(predictions=all_preds, label_ids=all_labels), ALL_DATASET_LABELS[metric_key_prefix])
+        else:
+            metrics = {}
+
+        # To be JSON-serializable, we need to remove numpy types or zero-d tensors
+        metrics = denumpify_detensorize(metrics)
+
+        if all_losses is not None:
+            metrics[f"{metric_key_prefix}_loss"] = all_losses.mean().item()
+        if hasattr(self, "jit_compilation_time"):
+            metrics[f"{metric_key_prefix}_jit_compilation_time"] = self.jit_compilation_time
+
+        # Prefix all keys with metric_key_prefix + '_'
+        for key in list(metrics.keys()):
+            if not key.startswith(f"{metric_key_prefix}_"):
+                metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
+
+        return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
+
+    def multi_evaluate(self, ignore_keys_for_eval=None):
+        if isinstance(self.eval_dataset, dict):
+            metrics = {}
+            for eval_dataset_name, eval_dataset in self.eval_dataset.items():
+                dataset_metrics = self.evaluate(
+                    eval_dataset=eval_dataset,
+                    ignore_keys=ignore_keys_for_eval,
+                    metric_key_prefix=f"eval_{eval_dataset_name}",
+                )
+                metrics.update(dataset_metrics)
+        else:
+            metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
+        return metrics
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -26,7 +273,6 @@ def parse_args():
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument('--epoches', type=int, default=10, help='total training epoches')
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
-    parser.add_argument('--prefix-token', help='the prefix special token for ner task')
     parser.add_argument('--lr', type=float, default=5e-5, help="the learning rate")
     parser.add_argument('--bs', type=int, default=16, help="batch size per gpu")
     group_gpus = parser.add_mutually_exclusive_group()
@@ -69,8 +315,6 @@ def main():
         cfg.training.per_device_eval_batch_size=args.bs
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
-    if args.prefix_token is not None:
-        cfg.data.with_prefix_token = args.prefix_token
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -79,32 +323,58 @@ def main():
     # define args and configs
     model_args, data_args, training_args = cfg.model, cfg.data, cfg.training
 
+    def build_single_dataset(task_id, args):
+        nonlocal compute_metrics
+        logger.info(f"loading dataset: {args.type}")
+        cur_dataset = DATASETS.build(args)
+        all_dataset = cur_dataset.dataset
+        train_dataset, val_dataset = all_dataset["train"], all_dataset["validation"]
+        compute_metrics = cur_dataset.compute_metrics
+        return  train_dataset, val_dataset
+    
     # define dataset
-    all_dataset = DATASETS.build(data_args)
-    raw_datasets, compute_metrics = all_dataset.dataset, all_dataset.compute_metrics
-    tokenizer, data_collator = all_dataset.tokenizer, all_dataset.data_collator
+    compute_metrics = None
+    all_train_datasets, all_val_datasets = [], dict()
+    for index, data_arg in enumerate(data_args):
+        train_dataset, val_dataset = build_single_dataset(index, data_arg)
+        all_train_datasets.append(train_dataset)
+        all_val_datasets[data_arg.type] = val_dataset
 
+    merge_train_datasets = None
+    for train_dataset in all_train_datasets:
+        if merge_train_datasets is None:
+            merge_train_datasets = train_dataset.to_pandas()
+        else:
+            merge_train_datasets = merge_train_datasets._append(train_dataset.to_pandas())
+    merge_train_datasets = datasets.Dataset.from_pandas(merge_train_datasets)
+    merge_train_datasets.shuffle(seed=123)
+
+    raw_datasets = datasets.DatasetDict(
+        {"train": merge_train_datasets, "validation": all_val_datasets}
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+    data_collator = DataCollatorForTokenClassification(
+        tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None
+    )
     # define models
-    model = MultiheadBertForTokenClassification.from_pretrained(model_args.model_name_or_path,
-                                                            num_labels=len(data_args.ner_tags),
-                                                            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                                                            cache_dir=model_args.cache_dir,
-                                                            revision=model_args.model_revision,
-                                                            use_auth_token=True if model_args.use_auth_token else None,
-                                                            ignore_mismatched_sizes=model_args.ignore_mismatched_sizes)
-    model.config.id2label = all_dataset.id2label
-    model.config.label2id = all_dataset.label2id
+    config = MultiHeadClsConfig.from_pretrained(model_args.model_name_or_path)
+    model = MultiheadBertForTokenClassification.from_pretrained(model_args.model_name_or_path, config=config)
 
     # define training args
     args = TrainingArguments(**training_args)
-    trainer = Trainer(
+    trainer = MultiheadTrainer(
         model,
         args,
         train_dataset=raw_datasets["train"],
         eval_dataset=raw_datasets["validation"],
         data_collator=data_collator,
         tokenizer=tokenizer,
-        compute_metrics=lambda p: compute_metrics(p=p, label_list=all_dataset.labels)
+        compute_metrics=compute_metrics,
     )
 
     # Detecting last checkpoint.
@@ -134,12 +404,6 @@ def main():
         # training end
         metrics = train_result.metrics
         trainer.save_model()  # Saves the tokenizer too for easy upload
-
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(raw_datasets["train"])
-        )
-        metrics["train_samples"] = min(max_train_samples, len(raw_datasets["train"]))
-
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
@@ -147,12 +411,7 @@ def main():
     # When training ended Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-
-        metrics = trainer.evaluate()
-
-        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(raw_datasets["validation"])
-        metrics["eval_samples"] = min(max_eval_samples, len(raw_datasets["validation"]))
-
+        metrics = trainer.multi_evaluate()
         for key, value in metrics.items():
             if isinstance(value, list):
                 metrics[key] = sum(value) / len(value)
@@ -163,14 +422,11 @@ def main():
     # Predict
     if training_args.do_predict:
         logger.info("*** Predict ***")
-
         predictions, labels, metrics = trainer.predict(raw_datasets["test"], metric_key_prefix="predict")
         predictions = np.argmax(predictions, axis=2)
-
         for key, value in metrics.items():
             if isinstance(value, list):
                 metrics[key] = sum(value) / len(value)
-
         # Remove ignored index (special tokens)
         # true_predictions = [
         #     [data_args.ner_tags[p] for (p, l) in zip(prediction, label) if l != -100]
@@ -179,7 +435,6 @@ def main():
         true_predictions = [
             [data_args.ner_tags[p] for p in prediction] for prediction in predictions
         ]
-
         trainer.log_metrics("predict", metrics)
         trainer.save_metrics("predict", metrics)
         test_datasets = raw_datasets["test"]
