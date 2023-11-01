@@ -3,6 +3,22 @@ from tqdm import tqdm
 from copy import deepcopy
 from dataset import load_json, classfication_metric
 
+"""
+name:
+{
+    'precision': [0.9879960803527682, 0.8986486486486487, 0.7653846153846153], 
+    'recall': [0.9810265142301143, 0.8986486486486487, 0.8614718614718615], 
+    'f1': [0.9844989625289882, 0.8986486486486488, 0.8105906313645621], 
+    'accuracy': 0.9698145752479517
+}
+date:
+{
+    'precision': [0.9266255220996197, 0.8205013428827216, 0.7047337278106509], 
+    'recall': [0.9680234451318789, 0.6565186246418339, 0.6551155115511551], 
+    'f1': [0.946872213020767, 0.7294070831675288, 0.6790193842645382], 
+    'accuracy': 0.8959679439018282
+}
+"""
 
 URL = 'http://192.168.12.223:12765/api/v0/user_profile'
 
@@ -110,30 +126,37 @@ def reponse_from_web(req_data):
         return rsp_data
     return None
 
-def use_gt_label(ori_data, all_labels):
-    orders, date_index = ori_data["order"], ori_data["date_index"]
-    name_index = ori_data["name_index"]
-    date_labels, name_labels = ori_data["date_label"], ori_data["name_label"]
-    name_count, date_count = 0, 0
-    for order, date_label, name_label in zip(orders, date_labels, name_labels):
+def use_gt_label(ori_data, all_labels, is_name=False, is_date=False):
+    orders = ori_data["order"]
+    if is_name:
+        name_index, name_labels = ori_data["user_index"], ori_data["label"]
+        name_count = 0
+    if is_date:
+        date_index, date_labels = ori_data["user_index"], ori_data["label"]
+        date_count = 0
+    for index, order in enumerate(orders):
+        name_label = name_labels[index] if is_name else []
+        date_label = date_labels[index] if is_date else []
         if len(date_label) == 0 and len(name_label) == 0:
             all_labels.append([])
             continue
         words = order[1].split(" ")
         data = ["O" for _ in range(len(words))]
         # label name
-        for nl in name_label:
-            name = "USER_NAME" if (isinstance(name_index, (list, tuple)) and name_count in name_index) else "NON_USER_NAME"
-            name_count += 1
-            for n in nl:
-                data[n] = name
+        if is_name:
+            for nl in name_label:
+                name = "USER_NAME" if (isinstance(name_index, (list, tuple)) and name_count in name_index) else "NON_USER_NAME"
+                name_count += 1
+                for n in nl:
+                    data[n] = name
 
         # label date
-        for dl in date_label:
-            date = "USER_DATE" if (isinstance(date_index, (list, tuple)) and date_count in date_index) else "NON_USER_DATE"
-            date_count += 1
-            for d in dl:
-                data[d] = date
+        if is_date:
+            for dl in date_label:
+                date = "USER_DATE" if (isinstance(date_index, (list, tuple)) and date_count in date_index) else "NON_USER_DATE"
+                date_count += 1
+                for d in dl:
+                    data[d] = date
         all_labels.append(data)
 
 def match(source, target):
@@ -145,11 +168,21 @@ def match(source, target):
                 index.append(source.index(tw))
     return index
 
-def use_pred_label(ori_data, res_data, all_predictions):
-    user_name, user_date = res_data["user_names"], res_data["user_dobs"]
-    other_name, other_date = res_data["other_names"], res_data["other_dobs"]
+def use_pred_label(ori_data, res_data, all_predictions, is_name=False, is_date=False):
     orders = ori_data["order"]
-    if not (user_name or user_date or other_date or other_name):
+    if is_name:
+        user_name, other_name = res_data["user_names"], res_data["other_names"]
+        if not (user_name or other_name):
+            all_predictions.extend([[] for _ in range(len(orders))])
+            return
+        
+    if is_date:
+        user_date, other_date = res_data["user_dobs"], res_data["other_dobs"]
+        if not (user_date or other_date):
+            all_predictions.extend([[] for _ in range(len(orders))])
+            return
+        
+    if is_name and is_date and not (user_name or user_date or other_date or other_name):
         all_predictions.extend([[] for _ in range(len(orders))])
         return
 
@@ -157,28 +190,33 @@ def use_pred_label(ori_data, res_data, all_predictions):
         source_words = order[1].split(" ")
         data = ["O" for _ in range(len(source_words))]
 
-        # label user
-        un = match(source_words, user_name)
-        for i in un:
-            data[i] = "USER_NAME"
-        ud = match(source_words, user_date)
-        for i in ud:
-            data[i] = "USER_DATE"
-        # label other
-        on = match(source_words, other_name)
-        for i in on:
-            data[i] = "NON_USER_NAME"
-        od = match(source_words, other_date)
-        for i in od:
-            data[i] = "NON_USER_DATE"
-        if data == ["O" for _ in range(len(source_words))]:
-            all_predictions.append([])
-        else:
-            all_predictions.append(data)
+        # label name
+        if is_name:
+            un = match(source_words, user_name)
+            for i in un:
+                data[i] = "USER_NAME"
+            on = match(source_words, other_name)
+            for i in on:
+                data[i] = "NON_USER_NAME"
+        # label date
+        if is_date:
+            ud = match(source_words, user_date)
+            for i in ud:
+                data[i] = "USER_DATE"
+            od = match(source_words, other_date)
+            for i in od:
+                data[i] = "NON_USER_DATE"
+        empty_data = ["O" for _ in range(len(source_words))]
+        all_predictions.append([] if data == empty_data else data)
+
 
 def main():
     labels = ["O", "USER_NAME", "USER_DATE", "NON_USER_NAME", "NON_USER_DATE"]
-    json_path = "data/NAME_DATE_NER/val.json"
+    # json_path = "data/NAME_DATE_NER/val.json"
+    # json_path = "data/NAME_NER/val.json"
+    # is_name, is_date = True, False
+    json_path = "data/DATE_NER/val.json"
+    is_name, is_date = False, True
     val_dataset = load_json(json_path)
     all_labels, all_predictions = [], []
     for i in tqdm(range(len(val_dataset))):
@@ -186,8 +224,8 @@ def main():
         if org_data is None:
             continue
         reponse = reponse_from_web(org_data)
-        use_gt_label(val_dataset[i], all_labels)
-        use_pred_label(val_dataset[i], reponse, all_predictions)
+        use_gt_label(val_dataset[i], all_labels, is_name, is_date)
+        use_pred_label(val_dataset[i], reponse, all_predictions, is_name, is_date)
 
     # padding all_predictions or all_labels for compute metrics
     for i, pred in enumerate(all_predictions):
