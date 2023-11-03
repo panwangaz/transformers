@@ -54,7 +54,8 @@ class DATEDataset(NAMEDataset):
                     date_count += 1
                     for label_index in range(len(label)):
                         tag_index = label[label_index] + 1 if self.with_prefix_token is None else label[label_index] + 2
-                        label_flattened[tag_index] = date_value
+                        if tag_index < len(label_flattened):
+                            label_flattened[tag_index] = date_value
                 item["flat_label"].append(label_flattened)
         return data
 

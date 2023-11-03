@@ -118,7 +118,8 @@ class NAMEDataset(object):
                     name_count += 1
                     for label_index in range(len(label)):
                         tag_index = label[label_index] + 1 if self.with_prefix_token is None else label[label_index] + 2
-                        label_flattened[tag_index] = name_value
+                        if tag_index < len(label_flattened):
+                            label_flattened[tag_index] = name_value
                 item["flat_label"].append(label_flattened)
         return data
 
@@ -156,7 +157,7 @@ class NAMEDataset(object):
                         now_sentence = " ".join(_merge_lines(temp_tokens))
                         tokenized_now_sentence = self._tokenizer(now_sentence)
                         input_ids = tokenized_now_sentence["input_ids"]
-                        if len(input_ids) > 514:
+                        if len(input_ids) > 1024: # 514
                             del(temp_tokens[0])
                             del(temp_labels[0])
                             break
@@ -165,7 +166,11 @@ class NAMEDataset(object):
                         input_dict["labels"].append(_merge_lines(temp_labels))
                     else:
                         del(input_dict["bottom_len"][-1])
-
+        # with open("data/NAME_NER/tokens_and_labels.txt", "w+") as f:
+        #     for token, label in zip(input_dict["tokens"], input_dict["labels"]):
+        #         f.write(" ".join(token) + '\n')
+        #         f.write(" ".join(label) + '\n')
+        # f.close()
         return Dataset.from_pandas(pd.DataFrame({'tokens': input_dict["tokens"], 
                                                 'ner_tags': input_dict["labels"],
                                                 'bottom_len': input_dict["bottom_len"]}))
@@ -239,6 +244,8 @@ class NAMEDataset(object):
             "recall": results["recall"].tolist(),
             "f1": results["f1"].tolist(),
             "accuracy": results["accuracy"],
+            # "true_labels_num": true_labels_num,
+            # "true_pred_num": true_pred_num,
         }
         logger.info(log_res)
         return log_res

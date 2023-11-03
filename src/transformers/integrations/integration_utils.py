@@ -640,9 +640,19 @@ class TensorBoardCallback(TrainerCallback):
 
         if self.tb_writer is not None:
             logs = rewrite_logs(logs)
+            # add precision-recall curve
+            # precision, recall = logs.get("eval/precision", None), logs.get("eval/recall", None)
+            # if precision and recall:
+            #     id2label = kwargs["model"].config.id2label.values()
+            #     for i, p, r in zip(id2label, precision, recall):
+            #         self.tb_writer.add_pr_curve_raw(f"{i} precision-recall", 0, 0, 0, 0, p, r)
             for k, v in logs.items():
                 if isinstance(v, (int, float)):
                     self.tb_writer.add_scalar(k, v, state.global_step)
+                elif isinstance(v, list):
+                    id2label = kwargs["model"].config.id2label
+                    for i, value in enumerate(v):
+                        self.tb_writer.add_scalar(f"{k}_{id2label[i]}", value, state.global_step)
                 else:
                     logger.warning(
                         "Trainer is attempting to log a value of "
