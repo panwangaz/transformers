@@ -62,5 +62,6 @@ training = dict(
     lr_scheduler_type="cosine",
     weight_decay=0.01,
     logging_steps=50,
+    eval_steps=500,
     report_to="tensorboard",
 )

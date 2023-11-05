@@ -13,7 +13,7 @@ _base_ = [
     "../_base_/training.py",
 ]
 
-tokenizer_name = "ckpts/bert-base-ner"
+tokenizer_name = "ckpts/bert-large-ner"
 output_dir = "work_dirs"
 cache_dir = "work_dirs/test-name-ner"
 
@@ -27,6 +27,7 @@ data = dict(
 
     # ner dataset arguments
     ner_tags=("O", "USER_NAME", "NON_USER_NAME"), 
+    use_augmented_data=False,
     context_window=6,
     use_padding_for_context=True,
     tokenizer_name_or_path=tokenizer_name,

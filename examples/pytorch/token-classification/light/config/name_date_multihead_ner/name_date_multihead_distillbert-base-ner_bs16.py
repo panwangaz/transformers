@@ -26,7 +26,7 @@ _base_ = [
     "../_base_/training.py",
 ]
 
-tokenizer_name = "ckpts/bert-base-ner-multihead"
+tokenizer_name = "ckpts/distillbert-base-uncase-ner-multihead"
 output_dir = "work_dirs/"
 cache_dir = "work_dirs/test-name-date-ner"
 

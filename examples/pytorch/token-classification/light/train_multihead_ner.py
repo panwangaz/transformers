@@ -33,8 +33,8 @@ from transformers.trainer_pt_utils import (
 )
 from transformers.integrations.deepspeed import deepspeed_init
 from transformers.training_args import TrainingArguments
-from dataset import DATASETS, NAMEDataset, DATEDataset, DateNameDataset
-from model.modeling_multihead_tokencls import MultiheadBertForTokenClassification
+from dataset import DATASETS
+from model.modeling_multihead_tokencls import MultiheadBertForTokenClassification, MultiheadDistilBertForTokenClassification
 from model.configuration_multihead_tokencls import MultiHeadClsConfig
 
 if is_accelerate_available():
@@ -264,6 +264,8 @@ class MultiheadTrainer(Trainer):
         else:
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
         return metrics
+    
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -323,7 +325,7 @@ def main():
     # define args and configs
     model_args, data_args, training_args = cfg.model, cfg.data, cfg.training
 
-    def build_single_dataset(task_id, args):
+    def build_single_dataset(args):
         nonlocal compute_metrics
         logger.info(f"loading dataset: {args.type}")
         cur_dataset = DATASETS.build(args)
@@ -335,8 +337,8 @@ def main():
     # define dataset
     compute_metrics = None
     all_train_datasets, all_val_datasets = [], dict()
-    for index, data_arg in enumerate(data_args):
-        train_dataset, val_dataset = build_single_dataset(index, data_arg)
+    for data_arg in data_args:
+        train_dataset, val_dataset = build_single_dataset(data_arg)
         all_train_datasets.append(train_dataset)
         all_val_datasets[data_arg.type] = val_dataset
 
@@ -363,8 +365,17 @@ def main():
     )
     # define models
     config = MultiHeadClsConfig.from_pretrained(model_args.model_name_or_path)
-    model = MultiheadBertForTokenClassification.from_pretrained(model_args.model_name_or_path, config=config)
-
+    model_name = model_args.model_name_or_path.split('/')[1]
+    if model_name == "bert-base-ner-multihead":
+        model = MultiheadBertForTokenClassification.from_pretrained(model_args.model_name_or_path, config=config)
+    elif model_name == "distillbert-base-uncase-ner-multihead":
+        model = MultiheadDistilBertForTokenClassification.from_pretrained(model_args.model_name_or_path, config=config)
+    # add special tokens
+    special_tokens_dict = {'additional_special_tokens': ['[USER]','[ADVISOR]']}
+    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+    logger.info(f"add {num_added_toks} new special tokens: {special_tokens_dict.values()}")
+    model.resize_token_embeddings(len(tokenizer))
+    
     # define training args
     args = TrainingArguments(**training_args)
     trainer = MultiheadTrainer(

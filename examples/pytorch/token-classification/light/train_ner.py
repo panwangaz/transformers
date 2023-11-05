@@ -94,6 +94,11 @@ def main():
                                                             ignore_mismatched_sizes=model_args.ignore_mismatched_sizes)
     model.config.id2label = all_dataset.id2label
     model.config.label2id = all_dataset.label2id
+    # add special tokens
+    special_tokens_dict = {'additional_special_tokens': ['[USER]','[ADVISOR]']}
+    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+    logger.info(f"add {num_added_toks} new special tokens: {special_tokens_dict.values()}")
+    model.resize_token_embeddings(len(tokenizer))
 
     # define training args
     args = TrainingArguments(**training_args)
@@ -152,7 +157,7 @@ def main():
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(raw_datasets["validation"])
         metrics["eval_samples"] = min(max_eval_samples, len(raw_datasets["validation"]))
-
+        print(metrics)
         for key, value in metrics.items():
             if isinstance(value, list):
                 metrics[key] = sum(value) / len(value)

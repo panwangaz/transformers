@@ -20,7 +20,6 @@ class NAMEDataset(object):
                  train_file=None, 
                  validation_file=None, 
                  test_file=None, 
-                 use_augmented_data=False,
                  # define tokenizer
                  tokenizer_name_or_path=None, 
                  cache_dir="test-ner", 
@@ -60,7 +59,7 @@ class NAMEDataset(object):
         for name, file in zip(["train", "validation", "test"], [train_file, validation_file, test_file]):
             if file is not None:
                 logger.info(f"start to process {file} data!")
-                cur_dataset = self.get_dataset(file, context_window, use_augmented_data)
+                cur_dataset = self.get_dataset(file, context_window)
                 self._dataset[name] = cur_dataset.map(lambda x : self.tokenize_and_align_labels(self._tokenizer, \
                         text_column_name, label_column_name, use_padding_for_context, max_seq_length, self.label2id, task_id, x), batched=True)
 
@@ -123,7 +122,7 @@ class NAMEDataset(object):
                 item["flat_label"].append(label_flattened)
         return data
 
-    def get_dataset(self, path, window_size, use_augmented_data=False):
+    def get_dataset(self, path, window_size):
         """
         The tokenizer here is for the out of max seq text cutting
         """
@@ -137,16 +136,12 @@ class NAMEDataset(object):
             data = json.loads(fin.read())
             fin.close()
         data = self._get_labels(data)
-        input_dict = {"tokens": [] , "labels": [], "bottom_len":[]}
+        input_dict = {"tokens": [] , "labels": []}
 
         for order in tqdm(data):
             for line_index in range(len(order["order"])):
-                # is use_augmented_data is true, the input is already formed in the data file
-                if use_augmented_data and line_index != (len(order["order"]) - 1):
-                    continue
                 if order["order"][line_index][0]:
                     temp_tokens, temp_labels = [], []
-                    input_dict["bottom_len"].append(len(order["flat_order"][line_index]))
                     # pre-context input
                     for i in range(window_size + 1):
                         now_index = line_index - i
@@ -157,23 +152,20 @@ class NAMEDataset(object):
                         now_sentence = " ".join(_merge_lines(temp_tokens))
                         tokenized_now_sentence = self._tokenizer(now_sentence)
                         input_ids = tokenized_now_sentence["input_ids"]
-                        if len(input_ids) > 1024: # 514
+                        if len(input_ids) > 514:
                             del(temp_tokens[0])
                             del(temp_labels[0])
                             break
                     if len(temp_tokens) > 0:
                         input_dict["tokens"].append(_merge_lines(temp_tokens))
                         input_dict["labels"].append(_merge_lines(temp_labels))
-                    else:
-                        del(input_dict["bottom_len"][-1])
-        # with open("data/NAME_NER/tokens_and_labels.txt", "w+") as f:
+        # with open("data/ALL_DATA/tokens_and_labels.txt", "w+") as f:
         #     for token, label in zip(input_dict["tokens"], input_dict["labels"]):
         #         f.write(" ".join(token) + '\n')
         #         f.write(" ".join(label) + '\n')
         # f.close()
         return Dataset.from_pandas(pd.DataFrame({'tokens': input_dict["tokens"], 
-                                                'ner_tags': input_dict["labels"],
-                                                'bottom_len': input_dict["bottom_len"]}))
+                                                'ner_tags': input_dict["labels"]}))
 
     @staticmethod
     def tokenize_and_align_labels(tokenizer, text_column_name, label_column_name, 
@@ -191,23 +183,10 @@ class NAMEDataset(object):
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             previous_word_idx = None
             label_ids = []
-            bottom_len = examples["bottom_len"][i]
-            tokenized_bottom = tokenizer(
-                examples[text_column_name][i][-bottom_len:],
-                padding=padding,
-                truncation=True,
-                max_length=max_seq_length,
-                # We use this argument because the texts in our dataset are lists of words (with a label for each word).
-                is_split_into_words=True,
-            )
-            len_tokenized_bottom = len(tokenized_bottom["input_ids"]) - 2
-
             for j, word_idx in enumerate(word_ids):
                 # Special tokens have a word id that is None. We set the label to -100 so they are automatically
                 # ignored in the loss function.
                 if word_idx is None:
-                    label_ids.append(-100)
-                elif j <= (len(word_ids) - len_tokenized_bottom):
                     label_ids.append(-100)
                 # We set the label for the first token of each word.
                 elif word_idx != previous_word_idx:

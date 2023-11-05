@@ -23,7 +23,6 @@ data = dict(
     use_auth_token=False,
     # define ner dataset arguments
     ner_tags=None,
-    use_augmented_data=False,
     context_window=6,
     use_padding_for_context=True,
     tokenizer_name_or_path=None,
