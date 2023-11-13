@@ -12,6 +12,8 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from dataset import DATASETS
+from dob_extractor import DOBExtractor
+from dataset.utils import reorg_output
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,8 @@ def parse_args():
     parser.add_argument('--train', action='store_true', help='whether to train')
     parser.add_argument('--eval', action='store_true', help='whether to eval')
     parser.add_argument('--test', action='store_true', help='whether to predict and save the results')
-    parser.add_argument('--work-dir', help='the dir to save logs and models')
+    parser.add_argument('--ckpt', help='the path of checkpoint when test or eval')
+    parser.add_argument('--work-dir', default=None, help='the dir to save logs and models')
     parser.add_argument('--prefix-token', help='the prefix special token for ner task')
     parser.add_argument('--epoches', type=int, default=10, help='total training epoches')
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
@@ -53,6 +56,7 @@ def main():
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     output_dir_time = osp.join(osp.splitext(osp.basename(args.config))[0], timestamp)
     cfg.training.output_dir = osp.join(cfg.training.output_dir, output_dir_time)
+    ckpt_path = args.ckpt
 
     if args.lr is not None:
         cfg.training.learning_rate=args.lr
@@ -95,9 +99,6 @@ def main():
     model.config.id2label = all_dataset.id2label
     model.config.label2id = all_dataset.label2id
     # add special tokens
-    special_tokens_dict = {'additional_special_tokens': ['[USER]','[ADVISOR]']}
-    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
-    logger.info(f"add {num_added_toks} new special tokens: {special_tokens_dict.values()}")
     model.resize_token_embeddings(len(tokenizer))
 
     # define training args
@@ -168,21 +169,24 @@ def main():
     # Predict
     if training_args.do_predict:
         logger.info("*** Predict ***")
-
+        if ckpt_path is not None:
+            trainer._load_from_checkpoint(ckpt_path)
+        
+        start_time = time.time()
         predictions, labels, metrics = trainer.predict(raw_datasets["test"], metric_key_prefix="predict")
         predictions = np.argmax(predictions, axis=2)
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"total inference time: {total_time}, total samples: {predictions.shape[0]}, per sample: {total_time / predictions.shape[0]}")
 
         for key, value in metrics.items():
             if isinstance(value, list):
                 metrics[key] = sum(value) / len(value)
 
         # Remove ignored index (special tokens)
-        # true_predictions = [
-        #     [data_args.ner_tags[p] for (p, l) in zip(prediction, label) if l != -100]
-        #     for prediction, label in zip(predictions, labels)
-        # ]
         true_predictions = [
-            [data_args.ner_tags[p] for p in prediction] for prediction in predictions
+            [data_args.ner_tags[p] for (p, l) in zip(prediction, label) if l != -100]
+            for prediction, label in zip(predictions, labels)
         ]
 
         trainer.log_metrics("predict", metrics)
@@ -190,12 +194,18 @@ def main():
         test_datasets = raw_datasets["test"]
         # Save predictions
         output_predictions_file = os.path.join(training_args.output_dir, "predictions.txt")
+        dob_extract = DOBExtractor() if "USER_DATE" in data_args["ner_tags"] else None
         if trainer.is_world_process_zero():
             with open(output_predictions_file, "w") as writer:
                 for prediction, ori_data in zip(true_predictions, test_datasets):
                     tokens = ori_data["tokens"]
+                    new_tokens_id = tokenizer(" ".join(tokens))["input_ids"]
+                    new_tokens = tokenizer.convert_ids_to_tokens(new_tokens_id)[1:-1]
+                    res = reorg_output(prediction, new_tokens, data_args["ner_tags"][1:], dob_extract)
                     writer.write(" ".join(tokens) + "\n")
-                    writer.write(" ".join(prediction) + "\n")
+                    for k, v in res.items():
+                        writer.write(f"{k}: {v}" + "\n")
+                    writer.write("\n")
 
 
 if __name__ == "__main__":

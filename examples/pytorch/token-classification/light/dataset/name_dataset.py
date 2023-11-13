@@ -51,8 +51,12 @@ class NAMEDataset(object):
                 use_fast=use_fast,
                 revision=revision,
                 use_auth_token=use_auth_token,
+                do_basic_tokenize = False,
             )
-            self._data_collator = DataCollatorForTokenClassification(self._tokenizer)
+            # add special tokens
+            special_tokens_dict = {'additional_special_tokens': ['[USER]','[ADVISOR]']}
+            num_added_toks = self._tokenizer.add_special_tokens(special_tokens_dict)
+            logger.info(f"add {num_added_toks} new special tokens: {special_tokens_dict.values()}")
             logger.info("finish initial the data tokenizer and collator!")
 
         # loading dataset for source data
@@ -73,7 +77,7 @@ class NAMEDataset(object):
     
     @property
     def data_collator(self):
-        return self._data_collator
+        return DataCollatorForTokenClassification(self._tokenizer)
     
     @property
     def labels(self) -> ClassLabel:
@@ -223,8 +227,6 @@ class NAMEDataset(object):
             "recall": results["recall"].tolist(),
             "f1": results["f1"].tolist(),
             "accuracy": results["accuracy"],
-            # "true_labels_num": true_labels_num,
-            # "true_pred_num": true_pred_num,
         }
         logger.info(log_res)
         return log_res

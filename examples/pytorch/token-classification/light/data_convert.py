@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from tqdm import tqdm
 from copy import deepcopy
 from dataset.utils import load_json, write_json
@@ -30,11 +31,25 @@ def remove_extra_words(sentence):
     sentence = sentence.strip()
     return sentence
 
+def separate_emojis_and_text(input_string):
+    separated_string = ""
+
+    for char in input_string:
+        if unicodedata.category(char) == "So":
+            # 表情包特殊字符
+            separated_string += " " + char + " "
+        else:
+            # 其他字符
+            separated_string += char
+
+    return separated_string
+
 def extract_order(data):
     orders = []
     for order in data:
         if len(order) < 2:
             continue
+        order[1] = separate_emojis_and_text(order[1])
         order[1] = remove_extra_words(order[1])
         orders.append(order[:2])
     return orders
@@ -199,25 +214,6 @@ def main(data_path, save_path):
 
     write_json(new_data, save_path)
 
-# def main():
-#     label_path = "data/new_data/tagged_data.json"
-#     data_path = "data/new_data/first_order.20230823-1417.json"
-#     save_path = "data/new_data/train.json"
-
-#     labels = load_json(label_path)
-#     datas = load_json(data_path)
-
-#     new_data = []
-#     for key, data in tqdm(datas.items(), desc="processing single order"):
-#         if key not in labels.keys():
-#             continue
-#         order = extract_order(data)
-#         name_label, dob_label, name_user_index, dob_user_index = extract_label(order, labels[key]["tag_info"])
-#         cur_order = deepcopy(ORDER)
-#         cur_order["order"], cur_order["name_label"], cur_order["date_label"] = order, name_label, dob_label
-#         cur_order["date_index"], cur_order["name_index"] = dob_user_index, name_user_index
-#         new_data.append(cur_order)
-#     write_json(new_data, save_path)
 
 if __name__ == "__main__":
     data_path = "data/label_20231109/user_profile_tagged_data.2023-11-09.json"

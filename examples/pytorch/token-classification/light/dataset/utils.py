@@ -113,6 +113,56 @@ def remove_duplicate_lines(data, is_merge=False, is_name=False, is_date=False):
                 date_label.pop(i)
     return data
 
+def merge_tokens(tokens):
+    outputs, pre_token = [], ""
+    if not tokens:
+        return outputs
+    for i, token in enumerate(tokens):
+        if not pre_token:
+            pre_token = token
+        elif '#' not in token:
+            outputs.append(pre_token)
+            pre_token = token
+        elif '#' in token:
+            pre_token += token.replace('#', '')
+        # collect lastest tokens
+        if i == len(tokens) - 1:
+            outputs.append(pre_token)
+    return outputs
+
+def group_consecutive_numbers(numbers):
+    groups = []
+    group = [numbers[0]]
+
+    for i in range(1, len(numbers)):
+        if numbers[i] == numbers[i-1] + 1:
+            group.append(numbers[i])
+        else:
+            groups.append(group)
+            group = [numbers[i]]
+
+    groups.append(group)
+    return groups
+
+def reorg_output(predictions, new_tokens, labels, extractor=None):
+    res = dict()
+    for label in labels:
+        indexs = [i for i, pred in enumerate(predictions) if pred == label]
+        if not indexs:
+            res[label] = []
+            continue
+        indexs = group_consecutive_numbers(indexs)
+        outputs = []
+        for index in indexs:
+            tokens = [new_tokens[i] for i in index]
+            output = merge_tokens(tokens)
+            outputs.append(" ".join(output))
+        if extractor is not None:
+            outputs = extractor.extract_dob(outputs)
+        res[label] = list(set(outputs))
+       
+    return res
+
 
 if __name__ == "__main__":    
     date = ["data/AgeNER/train5000.json", "data/AgeNER/valid.json"]
