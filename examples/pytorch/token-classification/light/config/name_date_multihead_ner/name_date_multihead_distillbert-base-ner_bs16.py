@@ -35,7 +35,7 @@ data = [
         type="NAMEDataset",
         train_file="data/ALL_DATA_20231109/name_train.json",
         validation_file="data/ALL_DATA_20231109/name_val.json",
-        test_file="data/ALL_DATA_20231109/name_val.json",
+        test_file="data/ALL_DATA_20231109/date_val.json",
         text_column_name="tokens",
         label_column_name="ner_tags",
 

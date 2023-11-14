@@ -206,29 +206,45 @@ def main(data_path, save_path):
     datas = load_json(data_path)
     new_data = []
     for data in tqdm(datas, desc="processing single order"):
-        order, label = merge_llm_human_labels(data)
+        order = extract_order(data['msc'])
         cur_order = deepcopy(ORDER)
-        cur_order["order"], cur_order["name_label"], cur_order["date_label"] = order, label[0], label[1]
-        cur_order["date_index"], cur_order["name_index"] = label[3], label[2]
+        user_info = data["user_info"]
+        cur_order["order"], cur_order["name_label"], cur_order["date_label"] = order, user_info["name"], user_info["dob"]
         new_data.append(cur_order)
 
     write_json(new_data, save_path)
 
+# def main(data_path, save_path):
+#     datas = load_json(data_path)
+#     new_data = []
+#     for data in tqdm(datas, desc="processing single order"):
+#         order, label = merge_llm_human_labels(data)
+#         cur_order = deepcopy(ORDER)
+#         cur_order["order"], cur_order["name_label"], cur_order["date_label"] = order, label[0], label[1]
+#         cur_order["date_index"], cur_order["name_index"] = label[3], label[2]
+#         new_data.append(cur_order)
+
+#     write_json(new_data, save_path)
 
 if __name__ == "__main__":
-    data_path = "data/label_20231109/user_profile_tagged_data.2023-11-09.json"
-    save_path = "data/label_20231109/train.json"
-    name_path = "data/label_20231109/name_train.json"
-    date_path = "data/label_20231109/date_train.json"
-    all_save_path = "data/ALL_DATA_20231109"
+    data_path = "data/label_20231113/all_first_order.json"
+    save_path = "data/label_20231113/train.json"
+    name_path = "data/label_20231113/name_train.json"
+    date_path = "data/label_20231113/date_train.json"
+    all_save_path = "data/ALL_DATA_20231113"
+    # data_path = "data/label_20231109/user_profile_tagged_data.2023-11-09.json"
+    # save_path = "data/label_20231109/train.json"
+    # name_path = "data/label_20231109/name_train.json"
+    # date_path = "data/label_20231109/date_train.json"
+    # all_save_path = "data/ALL_DATA_20231109"
 
     # step 1: load llm_human_data into data.json
     main(data_path, save_path)
 
     # step 2: split llm_human_data into name & date dataset
-    data = load_json(save_path)
+    # data = load_json(save_path)
     # show_order_and_label(data)
-    format_json(data, name_path, date_path)
+    # format_json(data, name_path, date_path)
 
     # # step 3: reorg new train & val dataset
-    reorg_train_val(name_path, date_path, all_save_path)
+    # reorg_train_val(name_path, date_path, all_save_path)

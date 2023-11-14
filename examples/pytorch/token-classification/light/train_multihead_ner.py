@@ -33,6 +33,7 @@ from transformers.integrations.deepspeed import deepspeed_init
 from transformers.training_args import TrainingArguments
 from dataset import DATASETS
 from dataset.utils import reorg_output
+from dob_extractor import DOBExtractor
 from model.modeling_multihead_tokencls import MultiheadBertForTokenClassification, MultiheadDistilBertForTokenClassification
 from model.configuration_multihead_tokencls import MultiHeadClsConfig
 
@@ -264,6 +265,19 @@ class MultiheadTrainer(Trainer):
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
         return metrics
     
+    def multi_predict(self, test_datasets):
+        assert isinstance(test_datasets, dict), "you must input a dict of dataset when using multi-head model"
+        predictions, labels, metrics = {}, {}, {}
+        for test_dataset_name, test_dataset in test_datasets.items():
+            prediction, label, metric = self.predict(
+                test_dataset=test_dataset,
+                metric_key_prefix=f"eval_{test_dataset_name}",
+            )
+            metrics.update(metric)
+            predictions[test_dataset_name], labels[test_dataset_name] = prediction, label
+
+        return predictions, labels, metrics
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
@@ -273,7 +287,7 @@ def parse_args():
     parser.add_argument('--test', action='store_true', help='whether to predict and save the results')
     parser.add_argument('--ckpt', help='the path of checkpoint when test or eval')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
-    parser.add_argument('--epoches', type=int, default=10, help='total training epoches')
+    parser.add_argument('--epoches', type=int, default=5, help='total training epoches')
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
     parser.add_argument('--lr', type=float, default=5e-5, help="the learning rate")
     parser.add_argument('--bs', type=int, default=16, help="batch size per gpu")
@@ -333,16 +347,18 @@ def main():
         all_dataset = cur_dataset.dataset
         tokenizer, data_collator = cur_dataset.tokenizer, cur_dataset.data_collator
         train_dataset, val_dataset = all_dataset["train"], all_dataset["validation"]
+        test_datasets = all_dataset["test"]
         compute_metrics = cur_dataset.compute_metrics
-        return train_dataset, val_dataset
+        return train_dataset, val_dataset, test_datasets
     
     # define dataset
     compute_metrics, tokenizer, data_collator = None, None, None
-    all_train_datasets, all_val_datasets = [], dict()
+    all_train_datasets, all_val_datasets, all_test_datasets = [], dict(), dict()
     for data_arg in data_args:
-        train_dataset, val_dataset = build_single_dataset(data_arg)
+        train_dataset, val_dataset, test_dataset = build_single_dataset(data_arg)
         all_train_datasets.append(train_dataset)
         all_val_datasets[data_arg.type] = val_dataset
+        all_test_datasets[data_arg.type] = test_dataset
 
     merge_train_datasets = None
     for train_dataset in all_train_datasets:
@@ -354,7 +370,7 @@ def main():
     merge_train_datasets.shuffle(seed=123)
 
     raw_datasets = datasets.DatasetDict(
-        {"train": merge_train_datasets, "validation": all_val_datasets}
+        {"train": merge_train_datasets, "validation": all_val_datasets, "test": all_test_datasets}
     )
 
     # define models
@@ -427,36 +443,45 @@ def main():
             trainer._load_from_checkpoint(ckpt_path)
         
         start_time = time.time()
-        predictions, labels, metrics = trainer.predict(raw_datasets["test"], metric_key_prefix="predict")
-        predictions = np.argmax(predictions, axis=2)
+
+        predictions, labels, metrics = trainer.multi_predict(raw_datasets["test"])
+        all_true_predictions = []
+        for dataset_name, pred in predictions.items():
+            cur_label = labels[dataset_name]
+            pred = np.argmax(pred, axis=2)
+            # Remove ignored index (special tokens)
+            true_predictions = [
+                [ALL_DATASET_LABELS[f"eval_{dataset_name}"][p] for (p, l) in zip(prediction, label) if l != -100]
+                for prediction, label in zip(pred, cur_label)
+            ]
+            all_true_predictions.append(true_predictions)
+
         end_time = time.time()
         total_time = end_time - start_time
-        print(f"total inference time: {total_time}, total samples: {predictions.shape[0]}, per sample: {total_time / predictions.shape[0]}")
+        print(f"total inference time: {total_time}, total samples: {pred.shape[0]}, per sample: {total_time / pred.shape[0]}")
 
         for key, value in metrics.items():
             if isinstance(value, list):
                 metrics[key] = sum(value) / len(value)
-
-        # Remove ignored index (special tokens)
-        true_predictions = [
-            [data_args.ner_tags[p] for (p, l) in zip(prediction, label) if l != -100]
-            for prediction, label in zip(predictions, labels)
-        ]
-
         trainer.log_metrics("predict", metrics)
         trainer.save_metrics("predict", metrics)
-        test_datasets = raw_datasets["test"]
+
+        test_datasets = raw_datasets["test"][dataset_name]
+        name_predictions, date_predictions = all_true_predictions
         # Save predictions
         output_predictions_file = os.path.join(training_args.output_dir, "predictions.txt")
+        dob_extract = DOBExtractor()
         if trainer.is_world_process_zero():
             with open(output_predictions_file, "w") as writer:
-                for prediction, ori_data in zip(true_predictions, test_datasets):
+                for name, date, ori_data in zip(name_predictions, date_predictions, test_datasets):
                     tokens = ori_data["tokens"]
                     new_tokens_id = tokenizer(" ".join(tokens))["input_ids"]
                     new_tokens = tokenizer.convert_ids_to_tokens(new_tokens_id)[1:-1]
-                    res = reorg_output(prediction, new_tokens, data_args["ner_tags"][1:])
+                    name_res = reorg_output(name, new_tokens, data_args[0]["ner_tags"][1:])
+                    date_res = reorg_output(date, new_tokens, data_args[1]["ner_tags"][1:], dob_extract)
+                    name_res.update(date_res)
                     writer.write(" ".join(tokens) + "\n")
-                    for k, v in res.items():
+                    for k, v in name_res.items():
                         writer.write(f"{k}: {v}" + "\n")
                     writer.write("\n")
 

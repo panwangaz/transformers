@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument('--ckpt', help='the path of checkpoint when test or eval')
     parser.add_argument('--work-dir', default=None, help='the dir to save logs and models')
     parser.add_argument('--prefix-token', help='the prefix special token for ner task')
-    parser.add_argument('--epoches', type=int, default=10, help='total training epoches')
+    parser.add_argument('--epoches', type=int, default=5, help='total training epoches')
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
     parser.add_argument('--lr', type=float, default=5e-5, help="the learning rate")
     parser.add_argument('--bs', type=int, default=16, help="batch size per gpu")
