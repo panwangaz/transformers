@@ -20,16 +20,25 @@ import logging
 import os
 import random
 import sys
-import warnings
+import pandas as pd
 from dataclasses import dataclass, field
 from typing import Optional
-
+import json
 import datasets
-import evaluate
+import datetime
 import numpy as np
 from datasets import load_dataset
-
+from datasets import Dataset
+import evaluate
 import transformers
+from tqdm import tqdm
+# from trainer import Trainer
+from custom_trainer import CustomTrainer as Trainer
+from scipy.special import softmax
+import warnings
+warnings.simplefilter("ignore")
+
+# from data_collator import default_data_collator
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
@@ -38,18 +47,23 @@ from transformers import (
     EvalPrediction,
     HfArgumentParser,
     PretrainedConfig,
-    Trainer,
+
     TrainingArguments,
     default_data_collator,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
+
+from utils.utils import my_metrics, collate_data_deprecated
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.35.0.dev0")
+# check_min_version("4.25.0.dev0")
+check_min_version("4.24.0.dev0")
+
+BEST_PR_AUC_LOG_PATH = os.path.join("./work_dirs/best_pr_auc_metrics/", datetime.datetime.now().strftime("%Y_%m_%d-%H_%M_%S") + ".json")
 
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
@@ -89,7 +103,7 @@ class DataTrainingArguments:
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
     max_seq_length: int = field(
-        default=128,
+        default=512,
         metadata={
             "help": (
                 "The maximum total input sequence length after tokenization. Sequences longer "
@@ -220,28 +234,90 @@ class ModelArguments:
     )
 
 
-def main():
-    # See all possible arguments in src/transformers/training_args.py
-    # or by passing the --help flag to this script.
-    # We now keep distinct sets of args, for a cleaner separation of concerns.
+@dataclass
+class CustomerArguments:
+    my_train_dir: str = field(
+        metadata={
+                    "help": 
+                    "Path to the taining file from customer."
+                 }
+    )
+    my_validataion_dir: str = field(
+        metadata={
+                    "help": 
+                    "Path to the validation file from customer."
+                 }
+    )
+    save_model_path: str = field(
+        metadata={
+                    "help":
+                    "The save model path."
+                 }
+    )
+    balance: bool = field(
+        metadata={
+            "help":
+            "ballance the data"
+        }
+    )
+    regression: bool = field(
+        metadata={
+            "help":
+            "regression task"
+        }
+    )
+    use_special_token: bool = field(
+        default=False,
+        metadata={
+            "help":
+            "ballance the data"
+        }
+    )
+    kick_ratio: float = field(
+        default=0.0,
+        metadata={
+            "help":
+            "ratio of the kicked data from the copy part."
+        }
+    )
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+
+def get_my_dataset(customer_args, data_args):
+    dataset_dict = {}
+    train_data, train_order_id, train_sample_num = collate_data_deprecated(
+        path=customer_args.my_train_dir,
+        balance=customer_args.balance,
+        regression=customer_args.regression,
+        max_len=data_args.max_seq_length
+    )
+    train_data_pre, train_order_id_pre, train_sample_num_pre = collate_data_deprecated(
+        path=customer_args.my_train_dir,
+        regression=customer_args.regression,
+        max_len=data_args.max_seq_length
+    )
+    
+    valid_data, valid_order_id, valid_sample_num = collate_data_deprecated(
+        path=customer_args.my_validataion_dir,
+        regression=customer_args.regression,
+        max_len=data_args.max_seq_length
+    )
+
+    dataset_dict["train"] = Dataset.from_pandas(pd.DataFrame(train_data))
+    dataset_dict["validation"] = Dataset.from_pandas(pd.DataFrame(valid_data))
+    dataset_dict["train_pre"] = Dataset.from_pandas(pd.DataFrame(train_data_pre))
+    dataset_dict["valid_pre"] = Dataset.from_pandas(pd.DataFrame(valid_data))
+
+    return datasets.DatasetDict(dataset_dict), train_order_id, train_sample_num, valid_order_id, valid_sample_num
+    
+
+def main():
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, CustomerArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, customer_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    if model_args.use_auth_token is not None:
-        warnings.warn("The `use_auth_token` argument is deprecated and will be removed in v4.34.", FutureWarning)
-        if model_args.token is not None:
-            raise ValueError("`token` and `use_auth_token` are both specified. Please set only the argument `token`.")
-        model_args.token = model_args.use_auth_token
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_glue", model_args, data_args)
+        model_args, data_args, training_args, customer_args = parser.parse_args_into_dataclasses()
 
     # Setup logging
     logging.basicConfig(
@@ -249,10 +325,6 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-
-    if training_args.should_log:
-        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
-        transformers.utils.logging.set_verbosity_info()
 
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
@@ -286,80 +358,41 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
-    # Get the datasets: you can either provide your own CSV/JSON training and evaluation files (see below)
-    # or specify a GLUE benchmark task (the dataset will be downloaded automatically from the datasets Hub).
-    #
-    # For CSV/JSON files, this script will use as labels the column called 'label' and as pair of sentences the
-    # sentences in columns called 'sentence1' and 'sentence2' if such column exists or the first two columns not named
-    # label if at least two columns are provided.
-    #
-    # If the CSVs/JSONs contain only one non-label column, the script does single sentence classification on this
-    # single column. You can easily tweak this behavior (see below)
-    #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
     if data_args.task_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            "./data/glue",
-            data_args.task_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-        )
+        raw_datasets,train_order_id,train_sample_num,valid_order_id,valid_sample_num = get_my_dataset(customer_args,data_args)
+
     elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
             data_args.dataset_name,
             data_args.dataset_config_name,
             cache_dir=model_args.cache_dir,
-            token=model_args.token,
+            use_auth_token=True if model_args.use_auth_token else None,
         )
-    else:
-        # Loading a dataset from your local files.
-        # CSV/JSON training and evaluation files are needed.
-        data_files = {"train": data_args.train_file, "validation": data_args.validation_file}
 
-        # Get the test dataset: you can provide your own CSV/JSON test file (see below)
-        # when you use `do_predict` without specifying a GLUE benchmark task.
-        if training_args.do_predict:
-            if data_args.test_file is not None:
-                train_extension = data_args.train_file.split(".")[-1]
-                test_extension = data_args.test_file.split(".")[-1]
-                assert (
-                    test_extension == train_extension
-                ), "`test_file` should have the same extension (csv or json) as `train_file`."
-                data_files["test"] = data_args.test_file
-            else:
-                raise ValueError("Need either a GLUE task or a test file for `do_predict`.")
-
-        for key in data_files.keys():
-            logger.info(f"load a local file for {key}: {data_files[key]}")
-
-        if data_args.train_file.endswith(".csv"):
-            # Loading a dataset from local csv files
-            raw_datasets = load_dataset(
-                "csv",
-                data_files=data_files,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
-        else:
-            # Loading a dataset from local json files
-            raw_datasets = load_dataset(
-                "json",
-                data_files=data_files,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
-    # See more about loading any type of standard or custom dataset at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
+    label_info = {
+        "label2id": {
+            "negative": 0,
+            "neutral": 1,
+            "positive": 2
+        },
+        "id2label": {
+            "0": "negative",
+            "1": "neutral",
+            "2": "positive"
+        }
+    }
 
     # Labels
     if data_args.task_name is not None:
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
-            label_list = raw_datasets["train"].features["label"].names
-            num_labels = len(label_list)
+            # label_list = raw_datasets["train"].features["label"].names
+            # use my label list
+            label_list = list(label_info["label2id"].keys())
+            num_labels = len(label_info["label2id"])
         else:
             num_labels = 1
     else:
@@ -387,14 +420,27 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
+
+    config.output_hidden_states = True
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
-        token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
+        use_auth_token=True if model_args.use_auth_token else None,
     )
+
+    if customer_args.use_special_token:
+        attr_to_special_token = {
+            'bos_token': '[BOS]',
+            'eos_token': '[EOS]',
+            'pad_token': '[PAD]',
+            'sep_token': '[SEP]',
+            'additional_special_tokens': ['[user]:', '[advisor]:']
+        }
+        tokenizer.add_special_tokens(attr_to_special_token)
+
     model = AutoModelForSequenceClassification.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -405,6 +451,9 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
+
+    if customer_args.use_special_token:
+        model.resize_token_embeddings(len(tokenizer))
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -436,12 +485,12 @@ def main():
     ):
         # Some have all caps in their config, some don't.
         label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
-        if sorted(label_name_to_id.keys()) == sorted(label_list):
+        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
             label_to_id = {i: int(label_name_to_id[label_list[i]]) for i in range(num_labels)}
         else:
             logger.warning(
                 "Your model seems to have been trained with labels, but they don't match the dataset: ",
-                f"model labels: {sorted(label_name_to_id.keys())}, dataset labels: {sorted(label_list)}."
+                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
                 "\nIgnoring the model labels as a result.",
             )
     elif data_args.task_name is None and not is_regression:
@@ -462,15 +511,14 @@ def main():
     max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
 
     def preprocess_function(examples):
-        # Tokenize the texts
-        args = (
-            (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
-        )
-        result = tokenizer(*args, padding=padding, max_length=max_seq_length, truncation=True)
-
+        # result = tokenizer(examples[sentence1_key], padding=padding, max_length=max_seq_length, truncation=True)
+        result = tokenizer(examples[sentence1_key], padding=padding, truncation=True)
+        # result = tokenizer(examples[sentence1_key], examples[sentence2_key], padding=padding, max_length=max_seq_length, truncation=True)
+        
         # Map labels to IDs (not necessary for GLUE tasks)
         if label_to_id is not None and "label" in examples:
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
+        result["group_id"] = [group_id for group_id in examples["group_id"]]
         return result
 
     with training_args.main_process_first(desc="dataset map pre-processing"):
@@ -496,13 +544,16 @@ def main():
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
 
-    if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        if "test" not in raw_datasets and "test_matched" not in raw_datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = raw_datasets["test_matched" if data_args.task_name == "mnli" else "test"]
-        if data_args.max_predict_samples is not None:
-            max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
-            predict_dataset = predict_dataset.select(range(max_predict_samples))
+    if training_args.do_predict:
+        if data_args.task_name is not None or data_args.test_file is not None:
+            if "valid_pre" not in raw_datasets and "test_matched" not in raw_datasets:
+                raise ValueError("--do_predict requires a test dataset")
+            train_predict_dataset = raw_datasets["test_matched" if data_args.task_name == "mnli" else "train_pre"]
+            valid_predict_dataset = raw_datasets["test_matched" if data_args.task_name == "mnli" else "valid_pre"]
+            if data_args.max_predict_samples is not None:
+                max_predict_samples = min(len(valid_predict_dataset), data_args.max_predict_samples)
+                valid_predict_dataset = valid_predict_dataset.select(range(max_predict_samples))
+                train_predict_dataset = train_predict_dataset.select(range(max_predict_samples))
 
     # Log a few random samples from the training set:
     if training_args.do_train:
@@ -519,13 +570,23 @@ def main():
 
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
-    def compute_metrics(p: EvalPrediction):
+    def compute_metrics(p: EvalPrediction, group_id_list: list):
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
-        result = metric.compute(predictions=preds, references=p.label_ids)
-        if len(result) > 1:
-            result["combined_score"] = np.mean(list(result.values())).item()
-        return result
+        if data_args.task_name is not None:
+            result = metric.compute(predictions=preds, references=p.label_ids)
+            # compute my metrics here
+            my_result = my_metrics(preds, p.label_ids, p.predictions)
+            print(my_result)
+            for a_key in list(my_result.keys()):
+                result[a_key] = my_result[a_key]
+            # if len(result) > 1:
+            #     result["combined_score"] = np.mean(list(result.values())).item()
+            return result
+        elif is_regression:
+            return {"mse": ((preds - p.label_ids) ** 2).mean().item()}
+        else:
+            return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
 
     # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
     # we already did the padding.
@@ -545,7 +606,19 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        kick_ratio=customer_args.kick_ratio
     )
+
+    with open(BEST_PR_AUC_LOG_PATH, "w") as fout:
+        dict_item = {
+            "best_pr_auc": 0,
+            "roc_auc": 0,
+            "recalls": [],
+            "precisions": [],
+            "args": customer_args.__dict__
+            }
+        dict_item["args"]["model_name"] = model_args.model_name_or_path
+        json.dump(dict_item, fout)
 
     # Training
     if training_args.do_train:
@@ -561,8 +634,7 @@ def main():
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-
+        trainer.save_model(customer_args.save_model_path)  # Saves the tokenizer too for easy upload
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
@@ -599,33 +671,61 @@ def main():
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
 
+    print("=="*60)
+    print("The metrics is written to {}".format(BEST_PR_AUC_LOG_PATH))
+    with open(BEST_PR_AUC_LOG_PATH, "r") as jf:
+        best_pr_auc_bf_dict = json.load(jf)
+    print(best_pr_auc_bf_dict["args"])
+
     if training_args.do_predict:
+        order_id_2_feature={}
+        order_id_predict={}
+        feature_name=['bert_'+str(i) for i in range(768)]
         logger.info("*** Predict ***")
 
         # Loop to handle MNLI double evaluation (matched, mis-matched)
-        tasks = [data_args.task_name]
-        predict_datasets = [predict_dataset]
+        tasks = [data_args.task_name,data_args.task_name]
+        predict_datasets = [train_predict_dataset,valid_predict_dataset]
+        order_id_list = [train_order_id,valid_order_id]
+        sample_num_list = [train_sample_num,valid_sample_num]
+
         if data_args.task_name == "mnli":
             tasks.append("mnli-mm")
             predict_datasets.append(raw_datasets["test_mismatched"])
 
-        for predict_dataset, task in zip(predict_datasets, tasks):
+        for predict_dataset, task, order_id_data, sample_num_data in zip(predict_datasets, tasks, order_id_list, sample_num_list):
             # Removing the `label` columns because it contains -1 and Trainer won't like that.
-            predict_dataset = predict_dataset.remove_columns("label")
-            predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
-            predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
+            predict_dataset_new = predict_dataset.remove_columns("label")
+            predictions,hidden_states = trainer.predict(predict_dataset_new, metric_key_prefix="predict")
+            predictions = predictions.predictions
+            
+            # predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
+            predictions = np.squeeze(predictions) if is_regression else softmax(predictions, axis=1)
 
-            output_predict_file = os.path.join(training_args.output_dir, f"predict_results_{task}.txt")
             if trainer.is_world_process_zero():
-                with open(output_predict_file, "w") as writer:
-                    logger.info(f"***** Predict results {task} *****")
-                    writer.write("index\tprediction\n")
-                    for index, item in enumerate(predictions):
-                        if is_regression:
-                            writer.write(f"{index}\t{item:3.3f}\n")
-                        else:
-                            item = label_list[item]
-                            writer.write(f"{index}\t{item}\n")
+                for index, item in enumerate(tqdm(predictions)):
+                    features = {}
+                    
+                    if order_id_data[index] not in order_id_predict:
+                        order_id_predict[order_id_data[index]] = {}
+                    if sample_num_data[index] not in order_id_predict[order_id_data[index]]:
+                        order_id_predict[order_id_data[index]][sample_num_data[index]] = {}
+                    order_id_predict[order_id_data[index]][sample_num_data[index]]['true'] = int(predict_dataset['label'][index])
+                    
+                    # order_id_predict[order_id_data[index]][sample_num_data[index]]['predict'] = int(item)
+                    order_id_predict[order_id_data[index]][sample_num_data[index]]['predict'] = list(item.astype(np.float))
+                    
+                    for i in range(768):
+                        features[feature_name[i]] = list(hidden_states[index].astype(float))[i]
+                    if order_id_data[index] not in order_id_2_feature:
+                        order_id_2_feature[order_id_data[index]] = {}
+                    if sample_num_data[index] not in order_id_2_feature[order_id_data[index]]:
+                        order_id_2_feature[order_id_data[index]][sample_num_data[index]] = features
+
+    with open('./data/sentence_feature.json', 'w') as f:
+        json.dump(order_id_2_feature, f)
+    with open('./tmp/sst2/order_id_predict.json', 'w') as f:
+        json.dump(order_id_predict, f)
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
     if data_args.task_name is not None:
